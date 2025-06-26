@@ -118,6 +118,11 @@ Interact with these Azure DevOps services:
 - **search_wiki**: Get wiki search results for a given search text.
 - **search_workitem**: Get work item search results for a given search text.
 
+### 🔒 Advanced Security
+
+- **advsec_get_alert_by_id**: Get an Advanced Security alert by ID.
+- **advsec_list_alerts_by_repo**: List Advanced Security alerts for a repository.
+
 ## 🔌 Installation & getting started
 
 Clone the repository, install dependencies, and add it to your MCP client configuration.
