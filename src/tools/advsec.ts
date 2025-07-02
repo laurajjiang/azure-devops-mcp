@@ -3,12 +3,25 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebApi } from "azure-devops-node-api";
 import { z } from "zod";
 import { SearchCriteria, Severity, AlertType, State } from "azure-devops-node-api/interfaces/AlertInterfaces.js";
+import { AdvSecEnablementStatusUpdate } from "azure-devops-node-api/interfaces/ManagementInterfaces.js";
 
 const ADVSEC_TOOLS = {
     get_alert_by_id: "advsec_get_alert_by_id",
     list_alerts_by_repo: "advsec_list_alerts_by_repo",
     get_enablement_status_by_repo: "advsec_get_enablement_status_by_repo",
     update_enablement_status_by_repo: "advsec_update_enablement_status_by_repo",
+}
+
+function getAlertSeverityName(alertSeverity: Severity): string {
+    return Severity[alertSeverity].toLowerCase();
+}
+
+function getAlertTypeName(alertType: AlertType): string {
+    return AlertType[alertType].toLowerCase();
+}
+
+function getAlertStateName(alertState: State): string {
+    return State[alertState].toLowerCase();
 }
 
 function configureAdvSecTools(
@@ -51,60 +64,61 @@ function configureAdvSecTools(
     {
       project: z.string().describe("Project ID or name to get the alert from"),
       repositoryId: z.string().describe("The ID of the repository where the alert is located."),
-      alertType: z.enum(["secrets", "dependencies", "code"]).optional().describe("Optional alert type to filter alerts. Defaults to all alerts."),
-      severities: z.array(z.enum(["low", "medium", "high", "critical"])).optional().describe("Array of severity levels to filter alerts. Defaults to ['critical', 'high']."),
-      state: z.enum(["active", "dismissed", "fixed"]).optional().describe("Optional state to filter alerts. Defaults to 'active'."),
+      top: z.number().default(100).describe("The maximum number of alerts to return. Defaults to 100."),
+      searchCriteria: z.object({
+        type: z.nativeEnum(AlertType).optional().describe("Filter by alert type"),
+        state: z.nativeEnum(State).default(State.Active).describe("Filter by alert state")},
+      ).optional().describe("Search criteria to filter alerts. Can include type, severity, state, etc."),
       continuationToken: z.string().optional().describe("Token to continue fetching alerts from a previous request."),
     },
     async ({
       project,
       repositoryId,
-      alertType,
-      severities = ["critical", "high"],
-      state = "active",
+      top,
+      searchCriteria,
       continuationToken,
     }) => {
         const connection = await connectionProvider();
         const alertApi = await connection.getAlertApi();
-        
-        const severityMap: { [key: string]: Severity } = {
-          "low": Severity.Low,
-          "medium": Severity.Medium, 
-          "high": Severity.High,
-          "critical": Severity.Critical
-        };
-    
-        const stateMap: { [key: string]: State } = {
-          "active": State.Active,
-          "dismissed": State.Dismissed,
-          "fixed": State.Fixed
-        };
-        
-        const alertTypeMap: { [key: string]: AlertType } = {
-          "secrets": AlertType.Secret,
-          "dependencies": AlertType.Dependency,
-          "code": AlertType.Code
-        };
-        
-        const searchCriteriaObj: SearchCriteria = {
-          states: [stateMap[state]],
-          severities: severities.map(s => severityMap[s]),
-          ...(alertType && { alertType: alertTypeMap[alertType] })
-        };
-        
         const alerts = await alertApi.getAlerts(
           project, 
           repositoryId, 
-          50, 
-          "severity", 
-          searchCriteriaObj,
-          undefined, // expand option
+          top,
+          "severity", // orderBy
+          searchCriteria as SearchCriteria, // Convert to SearchCriteria type,
+          undefined,
           continuationToken
         );
 
+        const arrayAlerts = Object.values(alerts)
+        const filteredAlerts = arrayAlerts?.map((alert) => {
+            // Helper function to safely extract rule information
+            const getFirstRule = () => {
+                return alert.tools?.[0]?.rules?.[0];
+            };
+            
+            const firstRule = getFirstRule();
+            
+            return {
+                id: alert.alertId,
+                type: alert.alertType ? getAlertTypeName(alert.alertType) : 'Unknown',
+                severity: alert.severity ? getAlertSeverityName(alert.severity) : 'Unknown',
+                state: alert.state ? getAlertStateName(alert.state) : 'Unknown',
+                title: alert.title,
+                lastSeenDate: alert.lastSeenDate,
+                firstSeenDate: alert.firstSeenDate,
+                introducedDate: alert.introducedDate,
+                toolName: alert.tools?.[0]?.name || 'Unknown tool',
+                ruleName: firstRule?.friendlyName || 'Unknown rule',
+                description: firstRule?.description || 'No description available',
+                remediation: firstRule?.helpMessage || 'No remediation information available'
+            };
+        });
+
         return {
-          content: [{ type: "text", text: JSON.stringify(alerts, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(filteredAlerts, null, 2) }],
         };
+      
       
     }
   );
@@ -122,10 +136,10 @@ function configureAdvSecTools(
     }) => {
         const connection = await connectionProvider();
         const managementApi = await connection.getManagementApi();
-        const alert = await managementApi.getRepoEnablementStatus2(project, repositoryId, true);
+        const enablement = await managementApi.getRepoEnablementStatus(project, repositoryId, true);
 
         return {
-          content: [{ type: "text", text: JSON.stringify(alert, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(enablement, null, 2) }],
         };
       
     }
@@ -135,19 +149,29 @@ function configureAdvSecTools(
     ADVSEC_TOOLS.update_enablement_status_by_repo,
     "Update the Advanced Security enablement properties for a particular repository.",
     {
-      project: z.string().describe("Project ID or name to get the alert from"),
-      repositoryId: z.string().describe("The ID of the repository where the alert is located."),
+      project: z.string().describe("Project ID or name to update enablement for"),
+      repositoryId: z.string().describe("The ID of the repository to update enablement for"),
+      enablementProperties: z.object({
+        advSecEnabled: z.boolean().describe("Whether Advanced Security is enabled for the repository"),
+        blockPushes: z.boolean().optional().describe("Whether to block pushes when security issues are detected"),
+        dependabotEnabled: z.boolean().optional().describe("Whether Dependabot is enabled for dependency updates"),
+        dependencyScanningInjectionEnabled: z.boolean().optional().describe("Whether dependency scanning injection is enabled"),
+        codeQLEnabled: z.boolean().optional().describe("Whether CodeQL default setup is enabled")
+      }).describe("The Advanced Security enablement properties to update Advanced Security with.")
     },
     async ({
       project,
       repositoryId,
+      enablementProperties
     }) => {
         const connection = await connectionProvider();
         const managementApi = await connection.getManagementApi();
-        //const alert = await managementApi.updateRepoAdvSecEnablementStatus2(project, repositoryId, true);
+        
+        // Call the update method with the enablement properties object
+        const result = await managementApi.updateRepoAdvSecEnablementStatus(enablementProperties as AdvSecEnablementStatusUpdate, project, repositoryId);
 
         return {
-          content: [{ type: "text", text: JSON.stringify(alert, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         };
       
     }
